@@ -25,18 +25,14 @@ LOG="$HERE/logs/$DATE.log"
   echo "── radar.py 退出码 = $code"
 
   if [ "$code" -eq 0 ]; then
-    if [ -n "${MAIL_TO:-}" ]; then
-      "$PY" -u "$HERE/tools/send_report.py" --date "$DATE"
-      echo "── 发信退出码 = $?"
-    else
-      echo "── MAIL_TO 未配置，跳过发信（报告已落盘：reports/$DATE.html）"
-    fi
+    "$PY" -u "$HERE/tools/notify.py" --date "$DATE"
+    echo "── 推送退出码 = $?"
   else
     echo "── 未取到数据：被 west.cn 限流，或抓取结果为空。"
     echo "── 按设计不发空报告、不编造域名。"
-    "$PY" -u "$HERE/tools/send_report.py" --date "$DATE" --failure \
+    "$PY" -u "$HERE/tools/notify.py" --date "$DATE" --failure \
       --reason "radar.py 退出码 $code（west.cn 限流或抓取结果为空）"
-    echo "── 失败告知邮件退出码 = $?"
+    echo "── 失败告知退出码 = $?"
   fi
   echo
 } >>"$LOG" 2>&1

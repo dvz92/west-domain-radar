@@ -7,9 +7,11 @@
 命令行（不进菜单，适合脚本调用）：
     python3 manage.py status
     python3 manage.py run
-    python3 manage.py email you@qq.com
+    python3 manage.py notify                # 交互式设定推送渠道
+    python3 manage.py channels              # 看当前渠道
+    python3 manage.py email you@qq.com      # 设定邮件收件人
     python3 manage.py time 09:30
-    python3 manage.py test-mail
+    python3 manage.py test                  # 发一条测试推送
     python3 manage.py pause | resume
     python3 manage.py uninstall [-y]
 """
@@ -28,7 +30,10 @@ CONFIG = os.path.join(ROOT, "config.env")
 REPORTS = os.path.join(ROOT, "reports")
 LOGS = os.path.join(ROOT, "logs")
 RUNNER = os.path.join(ROOT, "run.sh")
-SENDER = os.path.join(ROOT, "tools", "send_report.py")
+TOOLS = os.path.join(ROOT, "tools")
+SENDER = os.path.join(TOOLS, "send_report.py")
+NOTIFIER = os.path.join(TOOLS, "notify.py")
+sys.path.insert(0, TOOLS)              # 让 manage.py 能 import notify / send_report
 MARK = "# west-radar-daily"
 CRONTAB = os.environ.get("WDRADAR_CRONTAB", "crontab")
 # 把 crontab 落到本地文件（自测/沙箱用，不影响真实行为）
@@ -364,13 +369,14 @@ def act_set_email(argv=None):
         pause()
 
 
-def act_set_smtp(argv=None):
-    title("设定发件服务器（SMTP）")
+def act_set_smtp(argv=None, followup=True):
+    title("设定发件服务器（SMTP / 邮件渠道）")
     cfg = read_config()
     print(c("  注意：绝大多数邮箱要用「授权码 / 应用专用密码」，不是登录密码。", "ye"))
     print(c("  QQ 邮箱：mail.qq.com → 设置 → 账号与安全 →", "dim"))
     print(c("           开启 IMAP/SMTP 服务 → 手机验证 → 得到 16 位纯字母授权码", "dim"))
     print()
+    mail_to = ask("收件邮箱（多个用逗号分隔）", cfg.get("MAIL_TO", ""))
     host = ask("SMTP 服务器", cfg.get("SMTP_HOST", "smtp.qq.com"))
     port = ask("端口（465=SSL / 587=STARTTLS）", cfg.get("SMTP_PORT", "465"))
     sec = ask("加密方式 ssl/starttls/none",
@@ -382,21 +388,143 @@ def act_set_smtp(argv=None):
         if pwd:
             print(c("      （沿用原有授权码）", "dim"))
     frm = ask("发件人地址（留空=用上面那个）", cfg.get("SMTP_FROM", ""))
-    write_config({"SMTP_HOST": host, "SMTP_PORT": port, "SMTP_SECURITY": sec,
-                  "SMTP_USER": user, "SMTP_PASS": pwd, "SMTP_FROM": frm})
-    ok("SMTP 已保存")
-    if not cfg.get("MAIL_TO"):
-        warn("还没设收件邮箱（菜单 e），配了也发不出去")
-        if argv is None:
-            pause()
-        return
-    if argv is None and is_interactive():
+    write_config({"MAIL_TO": mail_to, "SMTP_HOST": host, "SMTP_PORT": port,
+                  "SMTP_SECURITY": sec, "SMTP_USER": user, "SMTP_PASS": pwd,
+                  "SMTP_FROM": frm})
+    ok("邮件渠道已保存")
+    if followup and argv is None and is_interactive():
         print()
         if ask("现在发一封测试邮件验证？(Y/n)", "y").lower() in ("y", "yes"):
-            act_test_mail()
+            act_test_push()
             return
-    if argv is None:
+    if followup and argv is None:
         pause()
+
+
+# 推送渠道：编号 → (渠道 key, 名称, [(配置键, 提示语, 默认值)])
+NOTIFY_MENU = [
+    ("1", "wecom", "企业微信机器人", [
+        ("WECOM_WEBHOOK", "机器人 Webhook 地址", "")]),
+    ("2", "dingtalk", "钉钉机器人", [
+        ("DINGTALK_WEBHOOK", "Webhook 地址", ""),
+        ("DINGTALK_SECRET", "加签密钥（安全设置没用加签就留空）", "")]),
+    ("3", "feishu", "飞书机器人", [
+        ("FEISHU_WEBHOOK", "Webhook 地址", "")]),
+    ("4", "serverchan", "Server酱（推到微信）", [
+        ("SERVERCHAN_KEY", "SendKey（sct.ftqq.com 拿）", "")]),
+    ("5", "pushplus", "PushPlus（推到微信）", [
+        ("PUSHPLUS_TOKEN", "token（pushplus.plus 拿）", "")]),
+    ("6", "telegram", "Telegram Bot", [
+        ("TG_BOT_TOKEN", "Bot Token（找 @BotFather 要）", ""),
+        ("TG_CHAT_ID", "你的 chat_id（找 @userinfobot 看）", "")]),
+    ("7", "ntfy", "ntfy（可自建）", [
+        ("NTFY_TOPIC", "topic 名（手机 App 订阅同名即可，别人猜不到就行）", ""),
+        ("NTFY_SERVER", "服务器地址", "https://ntfy.sh")]),
+    ("8", "webhook", "自定义 Webhook（POST JSON）", [
+        ("CUSTOM_WEBHOOK", "URL", "")]),
+    ("9", "email", "邮件（SMTP）", []),
+]
+NOTIFY_HINT = {
+    "wecom": "企业微信群 → 右上角「…」→ 群机器人 → 添加 → 复制 Webhook",
+    "dingtalk": "群设置 → 智能群助手 → 添加机器人 → 自定义 → 复制 Webhook",
+    "feishu": "群设置 → 群机器人 → 添加机器人 → 自定义机器人 → 复制 Webhook",
+    "serverchan": "浏览器开 sct.ftqq.com，微信扫码登录后拿 SendKey",
+    "pushplus": "浏览器开 pushplus.plus，微信扫码登录后拿 token",
+    "telegram": "①找 @BotFather 发 /newbot 拿 token ②找 @userinfobot 拿 chat_id",
+    "ntfy": "手机装 ntfy App，订阅一个别人猜不到的 topic 名",
+    "webhook": "任何能收 POST JSON 的地址，字段：title/content/source/date",
+    "email": "QQ/163/Gmail 都行，用「授权码」；海外 VPS 别用 25 端口",
+}
+
+
+def put_first(cfg, chan):
+    cur = [c.strip() for c in (cfg.get("NOTIFY_CHANNELS") or "").split(",") if c.strip()]
+    write_config({"NOTIFY_CHANNELS": ",".join([chan] + [c for c in cur if c != chan])})
+
+
+def act_set_notify():
+    title("设定推送方式")
+    cfg = read_config()
+    import notify
+    cur = notify.configured_channels(cfg)
+    print("  当前渠道（按尝试顺序）：%s"
+          % ("、".join(cur) if cur else c("（无，报告只落盘）", "ye")))
+    print(c("  配好多个渠道会自动失败转移：第一个成功就停。", "dim"))
+    print()
+    for num, chan, name, _ in NOTIFY_MENU:
+        mark = " " + c("←已启用", "gr") if chan in cur else ""
+        print("   %s) %s%s" % (c(num, "cy"), pad(name, 24), mark))
+    print("   " + c("0", "cy") + ") 返回")
+    print()
+    print(c("  💡 海外 VPS 上 SMTP 常被机房封，建议首选「1) 企业微信机器人」——", "dim"))
+    print(c("     它就是一次 HTTPS POST，最稳。", "dim"))
+    hr()
+    ch = input("  请选择渠道: ").strip()
+    if ch in ("0", ""):
+        return
+    hit = next((x for x in NOTIFY_MENU if x[0] == ch), None)
+    if not hit:
+        err("没有这个选项")
+        pause()
+        return
+    _, chan, name, fields = hit
+    title("设定：%s" % name)
+    print(c("  %s" % NOTIFY_HINT.get(chan, ""), "dim"))
+    print()
+    if chan == "email":
+        act_set_smtp(followup=True)
+        put_first(read_config(), "email")
+        return
+    vals = {}
+    for key, prompt, dflt in fields:
+        old = cfg.get(key, "") or dflt
+        v = ask(prompt, old)
+        vals[key] = v
+    write_config(vals)
+    put_first(read_config(), chan)
+    ok("%s 已保存，并设为**首选渠道**" % name)
+    print(c("     渠道顺序：%s" % read_config().get("NOTIFY_CHANNELS"), "dim"))
+    print()
+    if ask("现在发一条测试推送验证？(Y/n)", "y").lower() in ("y", "yes"):
+        act_test_push()
+        return
+    pause()
+
+
+def act_test_push():
+    title("发送测试推送")
+    cfg = read_config()
+    import notify
+    chans = notify.configured_channels(cfg)
+    if not chans:
+        warn("还没设定任何推送渠道，先用菜单 n")
+        pause()
+        return
+    print("  渠道顺序：%s" % "、".join(chans))
+    print()
+    try:
+        r = subprocess.run([sys.executable, NOTIFIER, "--test"],
+                           capture_output=True, text=True, timeout=180)
+    except Exception as e:                                           # noqa: BLE001
+        err("调用失败：%s" % e)
+        pause()
+        return
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    for l in out.split("\n"):
+        print("  " + l)
+    print()
+    if r.returncode == 0:
+        ok("测试推送成功")
+        print(c("  没收到？检查：渠道参数对不对 / 机器人是否被移出群 / 手机是否订阅了该 topic。", "dim"))
+    else:
+        err("全部渠道都失败了（上面有每个渠道的具体报错）")
+        print()
+        print("  常见原因：")
+        print("    · 企业微信/钉钉：Webhook 地址不完整，或机器人已被移出群")
+        print("    · 钉钉开了「加签」但没填密钥 → 菜单 n 里补上 DINGTALK_SECRET")
+        print("    · Telegram：没先给 bot 发过一条消息（bot 不能主动找陌生人）")
+        print("    · 邮件：授权码错 / 机房封了 465、587 端口 / 境外 IP 被当风险登录")
+    pause()
 
 
 def act_set_time(argv=None):
@@ -459,40 +587,6 @@ def act_toggle(argv=None):
         pause()
 
 
-def act_test_mail():
-    title("发送测试邮件")
-    cfg = read_config()
-    if not cfg.get("MAIL_TO"):
-        warn("还没设收件邮箱，先用菜单 e")
-        pause()
-        return
-    if not cfg.get("SMTP_HOST"):
-        warn("还没配 SMTP，先用菜单 s")
-        pause()
-        return
-    print("  收件人：%s" % cfg["MAIL_TO"])
-    print("  发件：  %s:%s (%s)" % (cfg.get("SMTP_HOST"), cfg.get("SMTP_PORT"),
-                                    cfg.get("SMTP_SECURITY")))
-    print()
-    try:
-        r = subprocess.run([sys.executable, SENDER, "--date", dt.date.today().isoformat(),
-                            "--subject-prefix", "[测试] 过期域名雷达"],
-                           capture_output=True, text=True, timeout=180)
-    except Exception as e:                                           # noqa: BLE001
-        err("调用失败：%s" % e)
-        pause()
-        return
-    out = (r.stdout or "") + (r.stderr or "")
-    if r.returncode == 0 and "已发送到" in out:
-        ok(out.strip().split("\n")[-1])
-        print(c("  没收到？先翻垃圾箱，并把发件人加白名单。", "dim"))
-    else:
-        err("发送失败：")
-        for l in out.strip().split("\n")[-8:]:
-            print("      " + l)
-        print()
-        print("  常见原因：授权码不对 / 端口被机房封（换 465 或 587）/ 发件方要求开启 SMTP 服务。")
-    pause()
 
 
 # ─────────────────────────── 卸载 ───────────────────────────
@@ -547,6 +641,21 @@ def act_uninstall(argv=None):
     sys.exit(0)
 
 
+def act_channels(argv=None):
+    import notify
+    cfg = read_config()
+    title("推送渠道")
+    chans = notify.configured_channels(cfg)
+    print("  当前配置：%s" % ("、".join(chans) if chans else c("（无，报告只落盘）", "ye")))
+    print("  说明：按这个顺序尝试，第一个成功就停（= 自动失败转移）。")
+    print()
+    for ch in notify.CHANNEL_ORDER:
+        print("   %-11s %s%s" % (ch, notify.CHANNEL_HELP[ch],
+                                c("   ←已启用", "gr") if ch in chans else ""))
+    if argv is None:
+        pause()
+
+
 # ─────────────────────────── 状态 ───────────────────────────
 def act_status(argv=None):
     cfg = read_config()
@@ -562,7 +671,21 @@ def act_status(argv=None):
         print("  定时任务 : %s" % c("❚❚ 已暂停（那行 cron 已被注释）", "ye"))
     else:
         print("  定时任务 : %s" % c("未设置", "ye"))
-    print("  通知邮箱 : %s" % (cfg.get("MAIL_TO") or c("未设置（只落盘不发信）", "ye")))
+    import notify
+    chans = notify.configured_channels(cfg)
+    print("  推送渠道 : %s" % ("、".join(chans) if chans
+                              else c("未配置（报告只落盘）", "ye")))
+    for ch in chans:
+        tail = ""
+        if ch == "wecom" and cfg.get("WECOM_WEBHOOK"):
+            tail = "  %s…" % cfg["WECOM_WEBHOOK"][-12:]
+        elif ch == "email":
+            tail = "  → %s" % (cfg.get("MAIL_TO") or "（收件人未设）")
+        elif ch == "telegram":
+            tail = "  chat %s" % (cfg.get("TG_CHAT_ID") or "?")
+        elif ch == "ntfy":
+            tail = "  topic %s" % (cfg.get("NTFY_TOPIC") or "?")
+        print("             %-11s%s" % (ch, c(tail, "dim")))
     if cfg.get("SMTP_HOST"):
         print("  发件服务器: %s:%s (%s)" % (cfg.get("SMTP_HOST"), cfg.get("SMTP_PORT"),
                                             cfg.get("SMTP_SECURITY")))
@@ -580,10 +703,10 @@ def act_status(argv=None):
 # ─────────────────────────── 菜单 ───────────────────────────
 MENU = [
     ("d", "立即运行一次", "马上抓取并出报告（不等定时）", act_run),
-    ("e", "设定通知邮箱", "报告发到哪个邮箱", act_set_email),
-    ("s", "设定发件服务器", "SMTP（授权码）；配错就收不到信", act_set_smtp),
+    ("n", "设定推送方式", "企业微信 / 钉钉 / 飞书 / 邮件 / Telegram …", act_set_notify),
+    ("e", "设定通知邮箱", "邮件渠道的收件地址", act_set_email),
     ("t", "设定每天启动时间", "北京时间几点跑", act_set_time),
-    ("m", "发送测试邮件", "验证邮箱配置是否正确", act_test_mail),
+    ("m", "发送测试推送", "验证推送渠道是否配通", act_test_push),
     ("r", "查看最近报告", "路径 + 摘要", act_show_report),
     ("l", "查看最近日志", "排查失败原因", act_show_log),
     ("p", "暂停 / 启用定时", "临时停跑，配置保留", act_toggle),
@@ -616,7 +739,12 @@ def menu():
         else:
             stat = c("未设置定时", "ye")
         print("   状态   %s" % stat)
-        print("   邮箱   %s" % (cfg.get("MAIL_TO") or c("未设置", "ye")))
+        try:
+            import notify
+            chans = notify.configured_channels(cfg)
+        except Exception:                                            # noqa: BLE001
+            chans = []
+        print("   推送   %s" % ("、".join(chans) if chans else c("未配置（只落盘）", "ye")))
         rp = latest_report()
         print("   报告   %s" % (os.path.basename(rp) if rp else c("还没有，按 d 跑一次", "dim")))
         hr()
@@ -656,9 +784,12 @@ def menu():
 CMDS = {
     "status": lambda a: act_status(a),
     "run": lambda a: act_run(),
+    "notify": lambda a: act_set_notify(),
     "email": lambda a: act_set_email(a),
     "time": lambda a: act_set_time(a),
-    "test-mail": lambda a: act_test_mail(),
+    "test": lambda a: act_test_push(),
+    "test-mail": lambda a: act_test_push(),
+    "channels": lambda a: act_channels(),
     "report": lambda a: act_show_report(),
     "log": lambda a: act_show_log(),
     "pause": lambda a: act_toggle("pause"),

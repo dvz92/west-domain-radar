@@ -44,6 +44,14 @@ open(os.path.join(TMP, "reports", "2026-09-25.md"), "w", encoding="utf-8").write
 open(os.path.join(TMP, "logs", "2026-09-25.log"), "w", encoding="utf-8").write(
     "过期域名雷达　2026-09-25 09:00:00 CST\n── radar.py 退出码 = 0\n")
 
+# 有真实 json 就拿来测推送正文渲染（reports 是 assets 的兄弟目录）
+for c in CANDIDATES:
+    cand = os.path.join(os.path.dirname(c), "reports", "2026-09-25.json")
+    if os.path.exists(cand):
+        shutil.copy2(cand, os.path.join(TMP, "reports", "2026-09-25.json"))
+        print("      已带入真实报告样例用于测推送正文：%s" % cand)
+        break
+
 got = 0
 for c in CANDIDATES:
     if all(os.path.exists(os.path.join(c, n)) for n in CORPORA):
@@ -145,6 +153,82 @@ r = subprocess.run([PY, "manage.py"], cwd=TMP, env=ENV, input="q\n",
                    capture_output=True, text=True, encoding="utf-8", errors="replace")
 print("[%s] 菜单退出码 %d" % ("OK" if r.returncode == 0 else "!!", r.returncode))
 print(r.stdout)
+
+print("\n=== 5) 推送渠道（notify.py）===")
+NOTIFY = os.path.join(TMP, "tools", "notify.py")
+
+
+def wcfg(pairs):
+    """直接改 config.env 里的键"""
+    p = os.path.join(TMP, "config.env")
+    lines = open(p, encoding="utf-8").read().split("\n")
+    for k, v in pairs.items():
+        for i, l in enumerate(lines):
+            if l.startswith(k + "="):
+                lines[i] = "%s=%s" % (k, v)
+                break
+        else:
+            lines.append("%s=%s" % (k, v))
+    open(p, "w", encoding="utf-8").write("\n".join(lines))
+
+
+def nrun(desc, *args, expect=0, show=0):
+    r = subprocess.run([PY, NOTIFY, *args], cwd=TMP, env=ENV, stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    ok = r.returncode == expect
+    if not ok:
+        FAIL.append("%s（期望 %d 实际 %d）" % (desc, expect, r.returncode))
+    print("\n%s %s  ← notify.py %s" % ("[OK]" if ok else "[!!]", desc, " ".join(args)))
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    for l in (out.split("\n")[:show] if show else []):
+        print("      " + l)
+    return r
+
+
+# 5a) 空配置：不应该谎报"已启用"
+wcfg({"NOTIFY_CHANNELS": "wecom,email", "WECOM_WEBHOOK": "", "SMTP_HOST": "", "MAIL_TO": ""})
+r = nrun("空配置 --list（应显示无可用渠道且列出缺什么）", "--list", show=6)
+if "（无）" not in r.stdout:
+    FAIL.append("空配置时 configured_channels 没有返回空")
+
+# 5b) 只填 wecom → 只有 wecom 可用
+wcfg({"WECOM_WEBHOOK": "http://127.0.0.1:9/hook"})
+r = nrun("只填 wecom --list", "--list", show=3)
+if "可用渠道（按尝试顺序）：wecom" not in r.stdout:
+    FAIL.append("填了 wecom 却没被识别为可用渠道")
+
+# 5c) --test 到不可达地址 → 应优雅失败（退出码 1，不是崩栈）
+r = nrun("wecom 指向不可达地址 --test（应失败但输出可读）", "--test", expect=1, show=4)
+if "失败" not in r.stdout:
+    FAIL.append("失败时没有输出可读的报错")
+
+# 5d) 多渠道：两个都不通 → 应该两个都试一遍（验证失败转移）
+wcfg({"NOTIFY_CHANNELS": "wecom,email", "SMTP_HOST": "127.0.0.1", "SMTP_PORT": "9",
+      "SMTP_SECURITY": "none", "MAIL_TO": "nobody@example.com"})
+r = nrun("wecom+email 都不通（应依次都尝试）", "--test", expect=1, show=6)
+tried = sum(1 for l in r.stdout.split("\n") if l.startswith("✗"))
+print("      → 实际尝试了 %d 个渠道" % tried)
+if tried < 2:
+    FAIL.append("失败转移没生效：配了两个渠道却只试了 %d 个" % tried)
+
+# 5e) 恢复干净配置，确认报告正文渲染没问题
+wcfg({"NOTIFY_CHANNELS": "", "WECOM_WEBHOOK": "", "SMTP_HOST": "", "SMTP_PORT": "465",
+      "SMTP_SECURITY": "ssl", "MAIL_TO": "", "SMTP_USER": "", "SMTP_PASS": ""})
+shutil.copy2(os.path.join(REPO, "config.example.env"),
+             os.path.join(TMP, "config.example.env"))
+r = subprocess.run([PY, "-c",
+                    "import sys;sys.path.insert(0,r'%s');import notify,json;"
+                    "res=json.load(open(r'%s/reports/2026-09-25.json',encoding='utf-8'))"
+                    " if __import__('os').path.exists(r'%s/reports/2026-09-25.json') else None;"
+                    "print(notify.build_text(res,'2026-09-25') if res else '（无样例报告，跳过）')"
+                    % (os.path.join(TMP, "tools"), TMP, TMP)],
+                   cwd=TMP, env=ENV, capture_output=True, text=True,
+                   encoding="utf-8", errors="replace")
+print("[%s] 推送正文渲染" % ("OK" if r.returncode == 0 else "!!"))
+for l in (r.stdout or "").strip().split("\n")[:6]:
+    print("      " + l)
+if r.returncode != 0:
+    FAIL.append("build_text 渲染失败")
 
 print("\n" + "=" * 62)
 if FAIL:

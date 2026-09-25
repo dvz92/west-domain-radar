@@ -105,6 +105,59 @@ wdradar uninstall             # 完整卸载
 - `assets/watchlist.txt` —— 你点名的域名，每天会单独核查状态，**并并入候选池参与排序**
   （com 池 1.6 万条只能抽样，靠它保证不漏）
 
+### 推送：不止邮件（推荐先配企业微信机器人）
+
+海外 VPS 上**邮件经常发不出去**，三个典型原因：
+
+| 现象 | 原因 |
+| --- | --- |
+| `Connection refused` / 超时 | 机房封了出站 25 / 465 / 587 端口 |
+| `535 Authentication failed` | 授权码错（或用了登录密码） |
+| `554` / 被退信 | 收件方把 VPS 的境外 IP 当垃圾邮件来源拒了 |
+
+而「机器人 Webhook」就是一次 HTTPS POST，**不碰邮件端口、不涉及收件方风控**，最稳。
+
+| 渠道 | 配置键 | 特点 |
+| --- | --- | --- |
+| **企业微信机器人** ⭐ | `WECOM_WEBHOOK` | 最省事最稳。群里建个机器人，复制 Webhook 就行，手机上直接看 |
+| 钉钉机器人 | `DINGTALK_WEBHOOK`（+`DINGTALK_SECRET` 加签） | 同上 |
+| 飞书机器人 | `FEISHU_WEBHOOK` | 同上 |
+| Server酱 / PushPlus | `SERVERCHAN_KEY` / `PUSHPLUS_TOKEN` | 推到**个人微信**，扫码即得 |
+| Telegram Bot | `TG_BOT_TOKEN` + `TG_CHAT_ID` | 海外 VPS 极稳，但手机端在国内要能连 Telegram |
+| ntfy | `NTFY_TOPIC` | 手机装 App 订阅一个 topic，**不用注册**，还能自建 |
+| 自定义 Webhook | `CUSTOM_WEBHOOK` | POST JSON：`title` / `content` / `source` / `date` |
+| 邮件 | `SMTP_*` + `MAIL_TO` | 保留，建议只当兜底 |
+
+**多个渠道会自动失败转移**：按 `NOTIFY_CHANNELS` 的顺序依次尝试，**第一个成功就停**。
+
+```ini
+NOTIFY_CHANNELS=wecom,email     # 企业微信优先，邮件兜底
+```
+
+> ⚠️ 只把渠道名写进 `NOTIFY_CHANNELS` **不算配好** —— 参数没填全的渠道会被自动跳过，
+> 状态里也不会显示成"已启用"。用 `wdradar channels` 能看到每个渠道还缺什么。
+
+#### 企业微信机器人（三步）
+
+1. 手机/电脑上建一个只有自己的企业微信群（或直接用现成的群）
+2. 群右上角 **「…」→ 群机器人 → 添加机器人 → 新创建**，起个名
+3. 复制它给的 **Webhook 地址**（形如 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx`）
+
+然后 VPS 上：
+
+```bash
+wdradar            # 选 n → 选 1 → 粘贴 Webhook → 选 y 发测试
+```
+
+#### 报告文件怎么办
+
+推送渠道只能发**文字消息**，所以正文里带的是 Top10 摘要；**完整 HTML 报告留在 VPS 上**：
+
+```bash
+wdradar report                                 # 看路径和摘要
+scp user@你的VPS:~/west-radar/reports/2026-09-26.html .
+```
+
 ### 邮件
 
 `smtplib` 直发，附件是 HTML + Markdown，正文是 Top10 摘要 + 费用提示 + 定向核查。
