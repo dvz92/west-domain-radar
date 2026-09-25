@@ -368,12 +368,14 @@ def act_set_smtp(argv=None):
     title("设定发件服务器（SMTP）")
     cfg = read_config()
     print(c("  注意：绝大多数邮箱要用「授权码 / 应用专用密码」，不是登录密码。", "ye"))
+    print(c("  QQ 邮箱：mail.qq.com → 设置 → 账号与安全 →", "dim"))
+    print(c("           开启 IMAP/SMTP 服务 → 手机验证 → 得到 16 位纯字母授权码", "dim"))
     print()
     host = ask("SMTP 服务器", cfg.get("SMTP_HOST", "smtp.qq.com"))
     port = ask("端口（465=SSL / 587=STARTTLS）", cfg.get("SMTP_PORT", "465"))
     sec = ask("加密方式 ssl/starttls/none",
               cfg.get("SMTP_SECURITY", "ssl" if port == "465" else "starttls"))
-    user = ask("发件邮箱（SMTP 用户名）", cfg.get("SMTP_USER", ""))
+    user = ask("发件邮箱（SMTP 用户名，填完整地址）", cfg.get("SMTP_USER", ""))
     pwd = ask("授权码 / 应用专用密码", "")
     if not pwd:
         pwd = cfg.get("SMTP_PASS", "")
@@ -383,6 +385,16 @@ def act_set_smtp(argv=None):
     write_config({"SMTP_HOST": host, "SMTP_PORT": port, "SMTP_SECURITY": sec,
                   "SMTP_USER": user, "SMTP_PASS": pwd, "SMTP_FROM": frm})
     ok("SMTP 已保存")
+    if not cfg.get("MAIL_TO"):
+        warn("还没设收件邮箱（菜单 e），配了也发不出去")
+        if argv is None:
+            pause()
+        return
+    if argv is None and is_interactive():
+        print()
+        if ask("现在发一封测试邮件验证？(Y/n)", "y").lower() in ("y", "yes"):
+            act_test_mail()
+            return
     if argv is None:
         pause()
 
