@@ -390,9 +390,10 @@ def main():
         if (cfg.get("NOTIFY_ON_FAILURE", "1") or "1") == "0":
             print("NOTIFY_ON_FAILURE=0，不发失败告知")
             return
-        notify(cfg, build_title(date_str, failure=True),
-               build_text(None, date_str, failure=args.reason), None, reason=args.reason)
-        return
+        ok = notify(cfg, build_title(date_str, failure=True),
+                    build_text(None, date_str, failure=args.reason), None, reason=args.reason)
+        # 之前这里漏了退出码 → 全部渠道都失败也返回 0，日志里看不出问题
+        sys.exit(0 if ok else 1)
 
     jpath = os.path.join(REPORTS, "%s.json" % date_str)
     if not os.path.exists(jpath):

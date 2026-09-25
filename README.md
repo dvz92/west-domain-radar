@@ -8,15 +8,15 @@
 │        过期域名雷达 · 管理面板                                 │
 └──────────────────────────────────────────────────────────────┘
    状态   运行中 每天 09:00（北京时间）
-   邮箱   you@qq.com
+   推送   wecom、email
    报告   2026-09-25.html
 ──────────────────────────────────────────────────────────────
    d) 立即运行一次       马上抓取并出报告（不等定时）
-   e) 设定通知邮箱       报告发到哪个邮箱
-   s) 设定发件服务器     SMTP（授权码）；配错就收不到信
+   n) 设定推送方式       企业微信 / 钉钉 / 飞书 / 邮件 / Telegram …
+   e) 设定通知邮箱       邮件渠道的收件地址
    t) 设定每天启动时间   北京时间几点跑
    ·────────────────────────────────────────────────────────
-   m) 发送测试邮件       验证邮箱配置是否正确
+   m) 发送测试推送       验证推送渠道是否配通
    r) 查看最近报告       路径 + 摘要
    l) 查看最近日志       排查失败原因
    p) 暂停 / 启用定时    临时停跑，配置保留
@@ -27,26 +27,43 @@
 ## 安装（两行）
 
 ```bash
-git clone https://github.com/<你>/west-domain-radar.git
+git clone https://github.com/dvz92/west-domain-radar.git
 cd west-domain-radar && bash install.sh
 ```
 
-不想 clone，也可以直接远程跑（把 `<你>` 换成你的 GitHub 用户名）：
+安装脚本会把文件复制到 `~/west-radar`，所以**克隆目录可以随便放**（放 `/tmp` 都行）。
+也可以直接克隆到安装目录里就地安装，脚本会自动跳过复制：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<你>/west-domain-radar/main/install.sh \
-  | REPO_SLUG=<你>/west-domain-radar bash
+git clone https://github.com/dvz92/west-domain-radar.git ~/west-radar
+cd ~/west-radar && bash install.sh
 ```
 
-想一步把邮件也配好：
+不想 clone，也可以直接远程跑：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<你>/west-domain-radar/main/install.sh \
-  | REPO_SLUG=<你>/west-domain-radar \
-    MAIL_TO=you@qq.com SMTP_HOST=smtp.qq.com SMTP_USER=you@qq.com SMTP_PASS=授权码 bash
+curl -fsSL https://raw.githubusercontent.com/dvz92/west-domain-radar/main/install.sh \
+  | REPO_SLUG=dvz92/west-domain-radar bash
+```
+
+想一步把推送也配好（以企业微信机器人为例）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dvz92/west-domain-radar/main/install.sh \
+  | REPO_SLUG=dvz92/west-domain-radar WECOM_WEBHOOK='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx' bash
 ```
 
 装完会：装 python3（缺的话）→ 下载语料并建索引 → 自检模型 → 装定时任务 → **立刻试跑一次**。
+
+## 更新到最新版
+
+```bash
+cd ~/west-domain-radar && bash install.sh      # 就地安装过的话
+# 或者：在克隆目录里 git pull && bash install.sh
+```
+
+`install.sh` **幂等**：重复运行只会覆盖程序文件，不会动 `config.env`、`reports/`、`logs/`，
+也不会把定时任务加成两条。
 
 ## 装完怎么用
 
@@ -54,7 +71,10 @@ curl -fsSL https://raw.githubusercontent.com/<你>/west-domain-radar/main/instal
 wdradar                       # 打开管理面板（推荐）
 wdradar run                   # 不等菜单，直接跑一次
 wdradar status                # 看状态
-wdradar email you@qq.com      # 设定收件邮箱
+wdradar notify                # 设定推送方式
+wdradar channels              # 看已启用的渠道 / 每个渠道还缺什么
+wdradar test                  # 发一条测试推送
+wdradar email you@qq.com      # 设定邮件收件人
 wdradar time 09:30            # 设定每天北京时间 9:30 跑
 wdradar pause / resume        # 暂停 / 启用定时
 wdradar uninstall             # 完整卸载

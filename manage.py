@@ -205,6 +205,13 @@ def cron_state():
 
 
 def local_offset_hours():
+    # Linux 上如果外部设了 TZ 环境变量，localtime 需要 tzset() 才会跟着变
+    # （Windows 的 Python 不支持 tzset，会一直用系统时区 —— 对 VPS 无影响）
+    if hasattr(time, "tzset"):
+        try:
+            time.tzset()
+        except Exception:                                            # noqa: BLE001
+            pass
     off = dt.datetime.now().astimezone().utcoffset() or dt.timedelta()
     return off.total_seconds() / 3600.0
 

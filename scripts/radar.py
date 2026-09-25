@@ -711,7 +711,14 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
     log = lambda s: print(s, file=sys.stderr)                        # noqa: E731
 
-    dates = resolve_deldate(today, parse_dates_arg(args.dates))
+    # ⚠️ resolve_deldate 也会请求接口（日期探测），同样可能被限流。
+    # 必须一起包在 try 里 —— 否则 BusyError 会以 traceback 形式抛出、退出码变成 1，
+    # 而 run.sh / 自动化都按"退出码 3 = 限流"来判定。
+    try:
+        dates = resolve_deldate(today, parse_dates_arg(args.dates))
+    except BusyError as e:
+        print("ERROR: %s（已中断，避免加重封禁）" % e, file=sys.stderr)
+        sys.exit(3)
     log("删除日期：" + "、".join("%s=%s" % (k, v[0]) for k, v in dates.items()))
 
     pool, watched = {}, {}

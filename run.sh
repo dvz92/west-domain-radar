@@ -4,20 +4,44 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ⚠️ 顺序很重要：必须先读 config.env，再据此设 TZ。
+# （原来写成先 export TZ 再 source，结果 config.env 里的 TZ_OVERRIDE 永远不生效。）
+[ -f "$HERE/config.env" ] && . "$HERE/config.env"
+
 # 站点按中国时间发布删除日期，必须用北京时间算"今天"
 export TZ="${TZ_OVERRIDE:-Asia/Shanghai}"
-
-[ -f "$HERE/config.env" ] && . "$HERE/config.env"
-PY="${PYTHON:-python3}"
 
 mkdir -p "$HERE/logs" "$HERE/reports"
 DATE="$(date +%F)"
 LOG="$HERE/logs/$DATE.log"
 
+# 怎么找 python3：
+#   1) config.env 里 PYTHON= 的绝对路径（安装脚本会写好）
+#   2) PATH 里的 python3 / python
+# cron 的 PATH 很干净，所以第 1 条往往才是救命的那个。
+resolve_python() {
+  if [ -n "${PYTHON:-}" ] && [ -x "${PYTHON}" ]; then
+    printf '%s' "$PYTHON"; return 0
+  fi
+  local c
+  for c in python3 python; do
+    if command -v "$c" >/dev/null 2>&1; then
+      command -v "$c"; return 0
+    fi
+  done
+  return 1
+}
+
 {
   echo "════════════════════════════════════════════"
   echo "过期域名雷达　$(date '+%F %T %Z')"
   echo "════════════════════════════════════════════"
+
+  if ! PY="$(resolve_python)"; then
+    echo "✗ 找不到 python3。请在 $HERE/config.env 里设 PYTHON=/绝对/路径/python3"
+    exit 1
+  fi
+  echo "解释器：$PY　时区：$TZ　日期：$DATE"
 
   cd "$HERE/scripts" || exit 1
   "$PY" -u radar.py
