@@ -166,6 +166,65 @@ git remote add origin https://github.com/<你>/west-domain-radar.git
 git branch -M main && git push -u origin main
 ```
 
+### ⚠️ GitHub 不接受账号密码了（2021-08-13 起）
+
+`git push` 提示 `Username for 'https://github.com':` / `Password:` 时，**密码填什么都不对**。
+三条路，从省事到麻烦：
+
+**① 仓库设成 public —— 最省事**
+
+公开仓库在 VPS 上 `git clone` **完全不需要认证**。这个项目里没有敏感信息（配置在
+`config.env`，已被 `.gitignore` 排除），所以公开是最省心的选择。
+
+**② SSH key —— 一次配置，以后免密**
+
+```bash
+ssh-keygen -t ed25519 -C "你的邮箱"      # 一路回车，密码可留空
+cat ~/.ssh/id_ed25519.pub                # 复制输出的整行
+```
+
+粘贴到 GitHub → Settings → **SSH and GPG keys** → New SSH key，然后换 remote：
+
+```bash
+git remote set-url origin git@github.com:<你>/west-domain-radar.git
+git push -u origin main
+```
+
+**③ Personal Access Token —— 当密码用**
+
+GitHub → 头像 → Settings → Developer settings → Personal access tokens →
+**Fine-grained tokens**（或 Tokens classic，勾 `repo`）→ 生成后**只显示一次**，先复制走。
+
+push 时：用户名填 **GitHub 用户名**，密码处**粘贴 token**。
+
+嫌每次都要输，可以缓存（注意 `store` 是明文存在 `~/.git-credentials`）：
+
+```bash
+git config --global credential.helper store     # 永久（明文）
+git config --global credential.helper cache     # 或：15 分钟内有效
+```
+
+### 私有仓库在 VPS 上怎么 clone
+
+不要用 `https://用户名:token@github.com/...`（token 会明文留在 `.git/config`）。
+推荐二选一：
+
+- **Deploy key（只读，最干净）**：仓库 → Settings → Deploy keys → Add deploy key，
+  把上面 `id_ed25519.pub` 的内容贴进去，然后
+  `git clone git@github.com:<你>/west-domain-radar.git`
+- **`gh auth login`（完全不碰密码）**：装 GitHub CLI 后运行，走设备码授权，
+  终端里只输一次性验证码，不涉及账号密码
+
+### 终端里粘贴密码
+
+在 Tabby 里默认是 **`Ctrl+Shift+V`**（macOS `⌘+V`）；也可以右键 → Paste
+（右键行为可在 设置 → 终端 里改为直接粘贴）。
+
+**密码提示下屏幕不会有任何回显**（连星号都没有），这是正常的安全行为，粘贴完直接回车。
+
+> 如果粘贴长 token 后报认证失败，去 设置 → 终端 把 **括号粘贴模式（bracketed paste）关掉**
+> 再试 —— 某些提示下终端会额外发送 `ESC[200~` / `ESC[201~` 包裹序列，被当成凭证的一部分。
+
 ## 系统要求
 
 - Linux（Debian / Ubuntu / CentOS / Alpine 都行），或任何能跑 python3 的机器
