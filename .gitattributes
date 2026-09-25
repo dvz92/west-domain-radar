@@ -1,0 +1,16 @@
+# 目标运行环境是 Linux VPS，行尾统一 LF。
+# 不加这个：Windows 上 core.autocrlf=true 时，如果哪天 autocrlf 配置变了，
+# install.sh / run.sh 可能被检出成 CRLF，在 Linux 上会报
+#   bash: ./install.sh: /bin/bash^M: bad interpreter
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.env  text eol=lf
+
+# 二进制/生成物（虽然 .gitignore 已经挡掉了，这里再声明一次更保险）
+*.png  binary
+*.jpg  binary
+*.gz   binary
