@@ -1,0 +1,21 @@
+# 运行时产物（不要提交）
+config.env
+state.json
+reports/
+logs/
+__pycache__/
+*.pyc
+
+# 下载的公开语料（安装时由 tools/fetch_corpora.py 自动拉取）
+assets/pinyin.txt
+assets/ime-base.dict.yaml
+assets/words_alpha.txt
+assets/google-20k.txt
+assets/google-10000-english-no-swears.txt
+
+# 由 build_assets.py 生成的索引
+assets/syllables.txt
+assets/cn_pinyin_words.txt
+assets/abbr4.txt
+assets/en_trigram.json
+assets/en_clusters.json
