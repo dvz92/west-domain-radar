@@ -45,7 +45,7 @@ STATE_FILE = os.path.join(SKILL_DIR, "state.json")
 
 API = "https://www.west.cn/services/grabnew/newlist.asp"
 PAGE_SIZE = 50
-MIN_INTERVAL = 2.5              # 串行节流（秒），别低于 1.5
+MIN_INTERVAL = 3.0              # 串行节流（秒），别低于 1.5；配 REQUEST_CAP=34 → ≈12 请求/分钟
 MAX_RETRY_ON_BUSY = 3
 BUSY_WAIT = 25
 
@@ -67,22 +67,42 @@ SUFFIX_RULE = {                 # 各后缀允许的主体长度
     "top": (2, 8),
 }
 
-# 每个"视图"= 1 次请求（已含三个后缀）。
-# 注意：接口的 deldate 只能传单值，而三个后缀的目标删除日期各不相同，
-# 所以抓取时是"对每个目标日期各跑一遍这些视图"，而不是一次覆盖所有日期。
-VIEWS = [
-    ("最短档(4~5位)", {"domlen1": 4, "domlen2": 8, "ordby": "domlen", "ordtp": "asc"}),
-    ("6位档", {"domlen1": 6, "domlen2": 8, "ordby": "domlen", "ordtp": "asc"}),
+# 站点可用的排序维度（每个视图 = 1 次请求，用来在一页 50 条的限制下抓"高信号"样本）
+VIEW_SPECS = [
+    ("最短",     {"ordby": "domlen",    "ordtp": "asc"}),
+    ("最早注册", {"ordby": "regdate",   "ordtp": "asc"}),
     ("估价最高", {"ordby": "refsmoney", "ordtp": "desc"}),
 ]
-# ≤4 位的小池子（几百条以内）做**完整枚举**，不抽样 —— 4 位正是"可发音英文/双拼/声母"的密集区，
+
+# 抓取"范围"= (后缀, 长度下限, 长度上限, 用哪几个视图, 是否完整枚举)
+#
+# ⚠️ 每个范围**只查它自己那个后缀的目标删除日期**，并且长度过滤交给服务端。
+# 这是 2026-09-26 那起事故的修复：
+#   以前用 arrdomext=com,cn,top 一次查三个后缀，而 deldate 只能传一个值，
+#   于是"为了查 com 的 09-30 批次"发出的请求，同时返回了 .top 的 09-30 批次记录；
+#   这些记录被无差别塞进候选池，最后霸占了榜单前 5 名——
+#   报告明明写着 top = 10-01，榜单却是 09-30 的 service.top / support.top / mint.top。
+#   **换出口可以，混批次不行。**
+# 拆成单后缀查询后，请求数不变，但每条返回结果都一定属于本批次，信号利用率高得多。
+SCOPES = [
+    ("top", 2, 4, [],          True),      # ≤4 位池子很小（今天 81 条），先枚举能保底拿到
+    ("cn",  2, 4, [],          True),      # 4 位 / 短位：完整枚举（几百条）
+    ("com", 5, 5, [0, 1, 2],   False),     # 5 位纯字母 .com 是最值钱的一档
+    ("com", 6, 8, [0, 1],      False),
+    ("cn",  5, 8, [0, 2],      False),
+    ("top", 5, 5, [0, 1, 2],   False),
+    ("top", 6, 8, [0, 1],      False),
+]
+# ≤4 位的小池子做**完整枚举**，不抽样 —— 4 位正是"可发音英文/双拼/声母"的密集区，
 # 抽样 50 条会漏掉用户看中的米（实测 sery.cn / glax.cn 就是这么漏掉的）。
 ENUM_MAXLEN = 4
 
 ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 # 单次运行的接口请求硬上限。**任何新增抓取逻辑都必须尊重这个上限**——
 # 2026-09-24 因为枚举逻辑无界递归，单次打出 120+ 请求，把配额烧光、IP 再次被封。
-REQUEST_CAP = 30
+# 2026-09-26 把这轮实测的安全区间定成：总量约 34 次、间隔 3 秒（≈12 请求/分钟），
+# 单次跑完约 2.5 分钟。超过这个速率目录不会被封，但也别离得更近。
+REQUEST_CAP = 34
 LOOKAHEAD_DAYS = 5
 VERIFY_RATIO = 0.10
 VERIFY_MIN = 30
@@ -246,40 +266,101 @@ def _enum_group(base, prefixes, items, log, allow_split=True):
     log("  ⚠ 分区 %s* 有 %d 条超出一页，只取到前 %d 条" % (prefixes[0], total, PAGE_SIZE))
 
 
+def _scope_base(ext, lo, hi, deldate):
+    """构造某个"范围"的公共查询参数：单后缀 + 该后缀自己的删除日期 + 服务端长度过滤。"""
+    p = {"arrdomext": ext, "deldate": deldate, "domlen1": lo, "domlen2": hi,
+         "domunkey": DIGITS_AND_HYPHEN, "pageno": 1, "pagesize": PAGE_SIZE}
+    if ext == "cn":
+        p["othercn"] = OTHERCN                       # 只要一级 cn
+    return p
+
+
+def fetch_scoped(dates, items, log=lambda s: None):
+    """按 (后缀, 长度区间) 逐块抓取，每块只用**该后缀自己的**目标删除日期。
+
+    返回 {范围标签: {"total": 池内总量, "fetched": 本轮取回条数}}。
+    每条取回的结果都必然属于本批次，所以不再需要跨批次过滤
+    （过滤仍然保留在 main() 里做保险，见那里关于 2026-09-26 事故的注释）。
+    """
+    totals = {}
+    for ext, lo, hi, views, _enum in SCOPES:
+        if not views:
+            continue
+        deldate = dates[ext][0]
+        label = "%s %d-%d位" % (ext, lo, hi)
+        for vi in views:
+            if _stats["requests"] >= REQUEST_CAP:
+                log("  ⛔ 已达请求上限 %d，停止继续抓取（本轮报告基于已取到的部分）" % REQUEST_CAP)
+                return totals
+            vname, vp = VIEW_SPECS[vi]
+            params = _scope_base(ext, lo, hi, deldate)
+            params.update(vp)
+            j = api_post(params)
+            b = j.get("body") or {}
+            if vi == views[0]:                        # 该范围的首个视图 → 建条目 + 池内总量
+                totals[label] = {"total": int(b.get("total") or 0), "fetched": 0}
+            got = b.get("items") or []
+            slot = totals.setdefault(label, {"total": 0, "fetched": 0})
+            slot["fetched"] += len(got)
+            log("  · %s（%s） / %-6s 取回 %d 条（池内 %s）"
+                % (label, deldate, vname, len(got), slot["total"]))
+            _collect(items, got)
+    return totals
+
+
 def fetch_small_pools(dates, items, log=lambda s: None):
-    """把 ≤4 位的小池子尽量**取全**（这部分不能靠抽样）。
+    """把 ≤4 位的小池子**按后缀分别取全**（这部分不能靠抽样）。
 
     为什么要取全：4 位正是"可发音英文 / 双拼 / 声母"的密集区，抽样 50 条会漏掉用户看中的米
-    （实测 sery.cn、glax.cn 就因此漏掉，用户直接质问）。
+    （实测 sery.cn、glax.cn 就因此漏掉，用户直接质问；2026-09-26 又因为把这一段的预算
+    让给了大池子采样，把 loho.top 挤掉了 —— 所以现在**这一段排在最前面跑**）。
 
     怎么绕开"第 2 页要登录"：用 `domkey` 按首字母**打包分区**（一次可传 20 个关键词）。
-    只枚举**最早那个目标日期**（用户最先要动手的那批），分组数按池内总量估算、硬上限 10 组，
-    所以这一段的请求数固定在 1+10 次以内。
+    ⚠️ 必须**按后缀分别枚举**、各自用各自的目标日期 —— 以前三个后缀混在一起只枚举最早的
+    那个日期，结果 .top 的 ≤4 位池（10-01）从来没被枚举过，而 .cn 日期下的 .top 记录
+    又混了进来。分组数按池内总量估算、硬上限 7 组，请求数有界。
+
+    返回 {范围标签: {"total": 池内总量, "fetched": 本轮取回条数, "full": 是否取全}}。
     """
-    earliest = min(d[0] for d in dates.values())
-    base = {"arrdomext": EXT_ALL, "othercn": OTHERCN, "deldate": earliest,
-            "domlen1": 1, "domlen2": ENUM_MAXLEN, "domunkey": DIGITS_AND_HYPHEN,
-            "pageno": 1, "pagesize": PAGE_SIZE}
-    j = api_post(dict(base))
-    b = j.get("body") or {}
-    total = int(b.get("total") or 0)
-    if not total:
-        return
-    if total <= PAGE_SIZE:
-        n = _collect(items, b.get("items") or [])
-        log("  ◆ %s ≤%d位：池内 %d 条，一次取全（新增 %d）" % (earliest, ENUM_MAXLEN, total, n))
-        return
-    groups = max(1, min(7, -(-total // 45)))             # 每组≈45 条，最多 7 组（控请求数）
-    step = -(-len(ALPHABET) // groups)
-    pkgs = [ALPHABET[i:i + step] for i in range(0, len(ALPHABET), step)]
-    before = len(items)
-    for pkg in pkgs:
+    totals = {}
+    for ext, lo, hi, _views, do_enum in SCOPES:
+        if not do_enum:
+            continue
+        deldate = dates[ext][0]
+        label = "%s %d-%d位" % (ext, lo, hi)
+        base = _scope_base(ext, lo, hi, deldate)
         if _stats["requests"] >= REQUEST_CAP:
-            log("  ⛔ 已达请求上限 %d，≤4位枚举提前结束" % REQUEST_CAP)
-            break
-        _enum_group(base, list(pkg), items, log)
-    log("  ◆ %s ≤%d位：池内 %d 条，分区枚举 %d 组（新增 %d）"
-        % (earliest, ENUM_MAXLEN, total, len(pkgs), len(items) - before))
+            log("  ⛔ 已达请求上限 %d，跳过 %s 枚举" % (REQUEST_CAP, label))
+            continue
+        j = api_post(dict(base))
+        b = j.get("body") or {}
+        total = int(b.get("total") or 0)
+        if not total:
+            totals[label] = {"total": 0, "fetched": 0, "full": True}
+            continue
+        got = b.get("items") or []
+        if total <= PAGE_SIZE:
+            n = _collect(items, got)
+            totals[label] = {"total": total, "fetched": len(got), "full": True}
+            log("  ◆ %s（%s）：池内 %d 条，一次取全（新增 %d）" % (label, deldate, total, n))
+            continue
+        groups = max(1, min(7, -(-total // 45)))             # 每组≈45 条，最多 7 组（控请求数）
+        step = -(-len(ALPHABET) // groups)
+        pkgs = [ALPHABET[i:i + step] for i in range(0, len(ALPHABET), step)]
+        before = len(items)
+        got_n, done = len(got), 0
+        for pkg in pkgs:
+            if _stats["requests"] >= REQUEST_CAP:
+                log("  ⛔ 已达请求上限 %d，%s 枚举提前结束" % (REQUEST_CAP, label))
+                break
+            _enum_group(base, list(pkg), items, log)
+            done += 1
+        # 分区枚举的"取回条数"拿不到精确值（_enum_group 只返回新增数），用新增数近似并标注
+        totals[label] = {"total": total, "fetched": got_n + (len(items) - before),
+                         "full": False, "groups": "%d/%d" % (done, len(pkgs))}
+        log("  ◆ %s（%s）：池内 %d 条，分区枚举 %d/%d 组（新增 %d）"
+            % (label, deldate, total, done, len(pkgs), len(items) - before))
+    return totals
 
 
 def fetch_watch(domains, log=lambda s: None):
@@ -304,31 +385,6 @@ def fetch_watch(domains, log=lambda s: None):
                 out[d] = it
     log("  定向核查 %d 个域名 → 命中 %d 个" % (len(domains), len(out)))
     return out
-
-
-def fetch_all(dates, items, log=lambda s: None):
-    """对每个目标删除日期各跑一遍 VIEWS（每次请求覆盖 com+cn+top 三个后缀）。
-    结果并入传入的 items 字典。返回 {日期: 池内总量}。"""
-    totals = {}
-    for ext, (deldate, _meta) in dates.items():
-        for vname, vp in VIEWS:
-            if _stats["requests"] >= REQUEST_CAP:
-                log("  ⛔ 已达请求上限 %d，停止继续抓取（本轮报告基于已取到的部分）" % REQUEST_CAP)
-                return totals
-            params = {
-                "arrdomext": EXT_ALL, "othercn": OTHERCN, "deldate": deldate,
-                "domlen1": 2, "domlen2": 8, "domunkey": DIGITS_AND_HYPHEN,
-                "pageno": 1, "pagesize": PAGE_SIZE,
-            }
-            params.update(vp)                                   # 视图参数覆盖默认长度
-            j = api_post(params)
-            b = j.get("body") or {}
-            if vname == VIEWS[0][0]:                             # 首视图 → 该日期池内总量
-                totals[deldate] = int(b.get("total") or 0)
-            got = b.get("items") or []
-            log("  · %s / %-12s 取回 %d 条" % (deldate, vname, len(got)))
-            _collect(items, got)
-    return totals
 
 
 # ---------------------------------------------------------------- 打分
@@ -447,6 +503,17 @@ def build_top(result):
     return pool
 
 
+def scope_of(v):
+    """pool_totals 的值：现在是 {"total","fetched","full"}，旧报告里是 int。
+    两种都兼容，免得旧脚本喂进来就崩。fetched 未知时返回 None（不要假装是 0）。"""
+    if isinstance(v, dict):
+        return v.get("total", 0), v.get("fetched"), bool(v.get("full"))
+    try:
+        return int(v), None, False
+    except (TypeError, ValueError):
+        return 0, None, False
+
+
 # ---------------------------------------------------------------- 报告
 def build_report(result, today):
     L = []
@@ -454,7 +521,7 @@ def build_report(result, today):
     A("# 过期域名雷达 · %s" % today.isoformat())
     A("")
     A("> 数据源：" + (result.get("data_source")
-                     or "west.cn 过期域名抢注列表（一次查询 com+cn+top）"))
+                     or "west.cn 过期域名抢注列表（按后缀分别查询，各用自己的删除日期）"))
     A("> 选品优先级：**英文单词 > 可发音英文 > 双拼/三拼 > 拼音首字母**；"
       "不沾边的（随机字母）直接淘汰")
     A("")
@@ -472,15 +539,25 @@ def build_report(result, today):
             MODE_LABEL.get(meta.get("mode"), meta.get("mode")),
             meta.get("counts", {}).get(d) or meta.get("today_total") or "—"))
     A("")
-    if result.get("pool_totals"):                       # 22.cn 源常拿不到池内总量，别显示误导性的 0
-        A("采样日期池内总量：%s（合计 %s%s）"
-          % ("、".join("%s→%s" % (k[5:] if len(k) == 10 and k[4] == "-" else k, v)
-                       for k, v in sorted(result["pool_totals"].items())),
-             result.get("pool_total", "—"),
-             "，为各类别池求和、类别间有重叠" if "22.cn" in (result.get("data_source") or "") else ""))
+    if result.get("pool_totals"):                       # 键是 "com 5-5位" 这种范围标签
+        A("各范围覆盖情况（池内总量 → 本轮取回）：")
         A("")
-    A("本轮取样 **%d** 条（多后缀合并），其中**值得关注的 %d** 条。"
-      % (result.get("sampled", 0), len(result["all_items"])))
+        A("| 范围 | 池内总量 | 本轮取回 | 覆盖率 |")
+        A("| --- | --- | --- | --- |")
+        for k in sorted(result["pool_totals"]):
+            t, f, full = scope_of(result["pool_totals"][k])
+            mark = "（完整枚举）" if full else ""
+            cov = "—" if not f or not t else "%.0f%%" % (100.0 * f / t)
+            A("| %s | %s | %s | %s%s |" % (k, t, "—" if f is None else f, cov, mark))
+        A("")
+        A("> 大池子（com 5-8 位今天有 1.7 万条）受「单次 50 条 + 第 2 页要登录」限制，"
+          "只能按排序维度取样，覆盖率低是**站点限制**、不是漏跑；"
+          "≤4 位的小池子会尽量取全。")
+        A("")
+    A("本轮取样 **%d** 条，其中**值得关注的 %d** 条。%s"
+      % (result.get("sampled", 0), len(result["all_items"]),
+         ("已剔除 %d 条不属于本批次的记录（保险丝，正常应为 0）。"
+          % result["dropped_offbatch"]) if result.get("dropped_offbatch") else ""))
     A("")
     A("## 二、最值得关注的 TOP 10")
     A("")
@@ -529,6 +606,7 @@ def build_report(result, today):
         A("")
         A("| 域名 | 长度 | 删除日期 | 原注册 | 状态 |")
         A("| --- | --- | --- | --- | --- |")
+        _rank = {x["domain"]: (i, x["score"]) for i, x in enumerate(result["all_items"], 1)}
         for w in watch:
             if w.get("included") is False:
                 A("| **%s** | %d | — | — | ⚠️ 不在本轮采集的分类池中（未验证） |"
@@ -536,6 +614,11 @@ def build_report(result, today):
                 continue
             st = []
             st.append("⚠️ 已被预订" if w["isyuding"] else "✅ 仍在待删除池中")
+            if w.get("out_of_batch"):
+                st.append("📌 不属于本轮批次（%s 到期的记录，本轮该后缀查的是别的日期）"
+                          % (w["deldate"] or "?"))
+            elif w["domain"] in _rank:
+                st.append("🏅 本轮第 %d 名（%d 分）" % _rank[w["domain"]])
             if w["premium"]:
                 st.append("溢价 %s 元" % (w["premiumprice"] or "?"))
             A("| **%s** | %d | %s | %s | %s |" % (
@@ -549,8 +632,9 @@ def build_report(result, today):
     A("")
     A(result.get("sample_note") or (
         "抽样说明：站点限制匿名单次查询 50 条、不可翻页、请求过快会封 IP，"
-        "所以按「估价最高 / 注册最早 / 默认 / 4~7 位长度分档」7 个视图各取一页，"
-        "三后缀合并后归类打分。不是全量枚举。"))
+        "所以**按后缀分别**沿「最短 / 注册最早 / 估价最高」等排序维度各取一页，"
+        "≤4 位的小池子用首字母分区尽量取全。**每条记录都必须是该后缀目标删除日期的批次**，"
+        "不是全量枚举。"))
     A("")
     A("本次共请求接口 %d 次（限流重试 %d 次）。生成时间：%s"
       % (result["requests"], result["busy"], result["generated_at"]))
@@ -614,12 +698,17 @@ def build_html(result, today):
     watch_html = ""
     if watch:
         wr = []
+        _rank = {x["domain"]: (i, x["score"]) for i, x in enumerate(result["all_items"], 1)}
         for w in watch:
             if w.get("included") is False:
                 wr.append("<tr><td class='dm'>%s</td><td>%d</td><td>—</td><td>—</td>"
                           "<td>⚠️ 不在本轮采集的分类池中（未验证）</td></tr>" % (esc(w["domain"]), w["len"]))
                 continue
             st = ["⚠️ 已被预订" if w["isyuding"] else "✅ 仍在待删除池中"]
+            if w.get("out_of_batch"):
+                st.append("📌 不属于本轮批次（%s 到期，本轮该后缀查的是别的日期）" % (w["deldate"] or "?"))
+            elif w["domain"] in _rank:
+                st.append("🏅 本轮第 %d 名（%d 分）" % _rank[w["domain"]])
             if w["premium"]:
                 st.append("溢价 %s 元" % (w["premiumprice"] or "?"))
             wr.append("<tr><td class='dm'>%s</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td></tr>"
@@ -627,7 +716,11 @@ def build_html(result, today):
                          w["regdate"] or "—", esc("、".join(st))))
         watch_html = ("<h2>五、定向核查（点名的域名是否还在）</h2>"
                       "<table><tr><th>域名</th><th>长度</th><th>删除日期</th>"
-                      "<th>原注册</th><th>状态</th></tr>%s</table>" % "".join(wr))
+                      "<th>原注册</th><th>状态</th></tr>%s</table>%s" % (
+                          "".join(wr),
+                          ("<p style='color:var(--mut);font-size:13px'>未在待删除池中查到：%s</p>"
+                           % esc("、".join(result.get("watch_missing") or [])))
+                          if result.get("watch_missing") else ""))
 
     return """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -663,7 +756,7 @@ tr:last-child td{border-bottom:none}
 选品优先级：<b>英文单词 &gt; 可发音英文 &gt; 双拼/三拼 &gt; 拼音首字母</b>；不沾边的随机字母直接淘汰</div>
 <h2>一、本轮信息</h2>
 <table><tr><th>后缀</th><th>删除日期</th><th>距今天数</th><th>判定方式</th><th>当日库存</th></tr>%s</table>
-<div class="sub">%s本轮取样 <b>%s</b> 条（多后缀合并）｜ 其中值得关注 <b>%s</b> 条</div>
+<div class="sub">%s本轮取样 <b>%s</b> 条 ｜ 其中值得关注 <b>%s</b> 条%s</div>
 <h2>二、最值得关注的 TOP 10</h2>
 <table><tr><th>#</th><th>域名</th><th>类别</th><th>评分</th><th>原注册</th><th>关注理由</th></tr>%s</table>
 <h2>三、按类别看</h2>%s
@@ -672,17 +765,22 @@ tr:last-child td{border-bottom:none}
 %s
 <div class="note">%s<br>本次共请求接口 %s 次（限流重试 %s 次）。生成时间 %s。</div>
 </body></html>""" % (today.isoformat(), today.isoformat(),
-                     esc(result.get("data_source") or "west.cn 过期域名抢注列表（一次查询 com+cn+top）"),
+                     esc(result.get("data_source") or
+                         "west.cn 过期域名抢注列表（按后缀分别查询，各用自己的删除日期）"),
                      "".join(drs),
-                     (esc("采样日期池内总量：%s（合计 %s%s）<br>" % (
-                         "、".join("%s→%s" % (k[5:] if len(k) == 10 and k[4] == "-" else k, v)
-                                   for k, v in sorted(result["pool_totals"].items())),
-                         result.get("pool_total", "—"),
-                         "，为各类别池求和、类别间有重叠"
-                         if "22.cn" in (result.get("data_source") or "") else ""))
+                     (esc("各范围覆盖：" + "　".join(
+                         "%s 池内 %s / 本轮取回 %s%s" % (
+                             k, scope_of(v)[0],
+                             "—" if scope_of(v)[1] is None else scope_of(v)[1],
+                             "（完整枚举）" if scope_of(v)[2] else "")
+                         for k, v in sorted(result["pool_totals"].items())) + "<br>")
                       if result.get("pool_totals") else ""),
                      result.get("sampled", 0),
-                     len(result["all_items"]), "".join(rows), "".join(cats),
+                     len(result["all_items"]),
+                     (esc("　已剔除 %d 条不属于本批次的记录（保险丝，正常应为 0）"
+                          % result["dropped_offbatch"])
+                      if result.get("dropped_offbatch") else ""),
+                     "".join(rows), "".join(cats),
                      warn_html, watch_html, esc(result.get("sample_note") or ""),
                      result["requests"], result["busy"], result["generated_at"])
 
@@ -721,18 +819,50 @@ def main():
         sys.exit(3)
     log("删除日期：" + "、".join("%s=%s" % (k, v[0]) for k, v in dates.items()))
 
-    pool, watched = {}, {}
+    pool, watched, domains_requested = {}, {}, []
     try:
-        pool_totals = fetch_all(dates, pool, log)
-        fetch_small_pools(dates, pool, log)
+        # ⚠️ 顺序有意义：**先枚举 ≤4 位的小池子**，再花剩余预算去采样大池子。
+        # 反过来的话，大池子采样会把请求预算吃光，把 top ≤4 位（今天只有 81 条、
+        # 却是最值钱的一档）整段跳掉 —— 2026-09-26 就这么把 loho.top 挤掉了。
+        pool_totals = fetch_small_pools(dates, pool, log)
+        pool_totals.update(fetch_scoped(dates, pool, log))
         wf = args.watch or os.path.join(ASSETS, "watchlist.txt")
         if os.path.exists(wf):
             doms = [l.strip().lower() for l in open(wf, encoding="utf-8", errors="ignore")
                     if l.strip() and not l.startswith("#")]
+            domains_requested = doms
             watched = fetch_watch(doms, log)
     except BusyError as e:
         print("ERROR: %s（已中断，避免加重封禁）" % e, file=sys.stderr)
         sys.exit(3)
+
+    # ── 保险丝：只保留"记录自带 deldate == 该后缀目标删除日期"的项 ──
+    # 抓取已经改成单后缀分块了，正常不会再有混批次；但这是**必须保留的兜底**：
+    # 2026-09-26 的事故就是跨批次记录混入，导致报告写着 top=10-01、榜单却是 09-30 的米。
+    keep, dropped = {}, []
+    for d, it in pool.items():
+        ext = (it.get("domext") or d.rsplit(".", 1)[-1] or "").lower()
+        want = dates.get(ext, (None,))[0]
+        got = (it.get("deldate") or "")[:10]
+        if want and got == want:
+            keep[d] = it
+        else:
+            dropped.append((d, got, want))
+    if dropped:
+        log("  ✂ 剔除 %d 条非本批次记录（例：%s）"
+            % (len(dropped), "、".join("%s[%s≠%s]" % t for t in dropped[:3])))
+    pool = keep
+
+    # 定向核查命中的域名，**只有确实属于本批次时**才并入候选池参与排序；
+    # 不属于的只出现在第五节"定向核查"里（如实标注它的真实删除日期）。
+    # 2026-09-26 修：atiron.com 的真实删除日期是 09-29，而当天 com 的批次是 09-30，
+    # 无条件合并会让榜单里凭空多出一个"最近清单里都没有"的域名。
+    for d, it in list(watched.items()):          # 遍历时可能改写同一字典 → 用快照
+        ext = (it.get("domext") or d.rsplit(".", 1)[-1] or "").lower()
+        if (it.get("deldate") or "")[:10] == dates.get(ext, (None,))[0]:
+            pool.setdefault(d, it)
+        else:
+            it["out_of_batch"] = True
 
     items = list(pool.values())
     scored = []
@@ -756,14 +886,20 @@ def main():
             "len": len(d.split(".")[0]),
             "isyuding": _int(it.get("isyd")) == 1 or _int(it.get("isyuding")) == 1,
             "premium": bool(it.get("ispremium")), "premiumprice": _int(it.get("premiumprice")),
+            "out_of_batch": bool(it.get("out_of_batch")),
         })
+    # 点名的域名若接口没返回，说明已不在待删除池（被抢注/已释放），必须在报告里如实列出，
+    # 否则会被静默丢弃、用户以为"没核查"（2026-09-26 修：sery.cn / glax.cn 曾这样消失）。
+    watch_missing = [d for d in domains_requested if d not in watched]
 
     by_cls = {k: [x for x in scored if x["cls"] == k] for k in lang.CLASS_ORDER}
     result = {
         "date": today.isoformat(), "dates": dates,
-        "pool_totals": pool_totals, "pool_total": sum(pool_totals.values()),
+        "pool_totals": pool_totals,
+        "pool_total": sum(scope_of(v)[0] for v in pool_totals.values()),
+        "dropped_offbatch": len(dropped),
         "sampled": len(items), "all_items": scored, "top10": scored[:10],
-        "watch": watch_rows,
+        "watch": watch_rows, "watch_missing": watch_missing,
         "by_class": {k: len(v) for k, v in by_cls.items()},
         "requests": _stats["requests"], "busy": _stats["busy"],
         "generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
