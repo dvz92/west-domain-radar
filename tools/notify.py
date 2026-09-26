@@ -94,61 +94,61 @@ def configured_channels(cfg):
 
 
 # ───────────────────────────── 正文 ─────────────────────────────
+# 2026-09-26 用户要求精简（原话）：
+#   "推送的内容字数有限，精简一下，只需要域名和原注册即可，也不要分最值得关注的、
+#    按类别分，只需要按顺序 com/cn/top 三种后缀域名 + 原注册一个个排下去即可。"
+# 所以：不再有 TOP10 标题、不再按类别分段、不再有评分/理由/池内总量/费用提示，
+# 只按 .com → .cn → .top 的顺序把域名和注册年份排下去。
+SUFFIX_ORDER = ("com", "cn", "top")
+PER_SUFFIX_CAP = 80          # 单后缀最多列这么多，超出只提示数量
+TEXT_BUDGET = 3600           # 正文总长上限（字节）——各渠道上限：企业微信 markdown/TG 4096，
+                             # 留出余量给标题与截断提示；超了从尾部收（com 在最前，优先级最高）
+
+
 def build_text(result, date_str, failure=None):
     """正文。Markdown 渠道直接用；Telegram 会包成 <pre> 转义后发送。"""
     if failure:
-        return ("过期域名雷达 · %s\n\n"
+        return ("过期域名雷达 %s\n\n"
                 "今天没取到数据，未生成日报。\n\n"
                 "原因：%s\n\n"
                 "按设计：这种情况不发空报告、不编造域名。\n"
                 "常见处理：换个出口 IP、或隔几小时重试；保持每天只跑一次。\n"
                 "详细日志见 VPS 上 logs/%s.log" % (date_str, failure, date_str))
 
-    lines = ["**过期域名雷达 · %s**" % date_str, ""]
-    top = result.get("top10") or []
-    if not top:
+    items = result.get("all_items") or []
+    groups = {ext: [] for ext in SUFFIX_ORDER}
+    for it in items:                                  # all_items 已按分数降序
+        ext = (it.get("domain") or "").rsplit(".", 1)[-1].lower()
+        if ext in groups:
+            groups[ext].append(it)
+
+    lines = ["过期域名雷达 %s" % date_str, ""]
+    if not items:
         lines.append("（本轮没有筛出值得关注的域名）")
-    for i, it in enumerate(top, 1):
-        seg = ["%d. **%s**" % (i, it.get("domain", "?")),
-               str(it.get("cls_label") or ""),
-               "%s 分" % it.get("score")]
-        if it.get("regdate"):
-            seg.append("注册 %s" % it["regdate"])
-        if it.get("premium"):
-            seg.append("⚠️溢价 %s 元" % (it.get("premiumprice") or "?"))
-        elif it.get("hot"):
-            seg.append("⚠️已被预订→竞拍")
-        lines.append(" ｜ ".join(x for x in seg if x))
-        reason = "、".join(x for x in (it.get("reasons") or []) if x)
-        if reason:
-            lines.append("     %s" % reason)
+    for ext in SUFFIX_ORDER:
+        g = groups[ext]
+        if not g:
+            continue
+        lines.append(ext)
+        for it in g[:PER_SUFFIX_CAP]:
+            reg = it.get("regdate")
+            lines.append("%s %s" % (it.get("domain", "?"), reg if reg else ""))
+        if len(g) > PER_SUFFIX_CAP:
+            lines.append("…另有 %d 个" % (len(g) - PER_SUFFIX_CAP))
+        lines.append("")
 
-    pool = result.get("pool_totals") or {}
-    if pool:
-        lines += ["", "池内：" + "、".join("%s %s 条" % (k, v) for k, v in sorted(pool.items()))]
-    cls = result.get("by_class") or {}
-    got = "、".join("%s %s" % (k, v) for k, v in cls.items() if v)
-    if got:
-        lines.append("值得关注：" + got)
-
-    watch = result.get("watch") or []
-    if watch:
-        lines += ["", "**定向核查**"]
-        for w in watch:
-            st = "已被预订" if w.get("isyuding") else "仍可预订"
-            lines.append("  · %s（%s，%s）" % (w.get("domain"), w.get("deldate") or "—", st))
-
-    warn = []
-    for it in result.get("all_items") or []:
-        if it.get("hot"):
-            warn.append("  · %s 已有人预订 → 会进竞拍" % it["domain"])
-        elif it.get("premium"):
-            warn.append("  · %s 溢价域名（%s 元）" % (it["domain"], it.get("premiumprice") or "?"))
-    if warn:
-        lines += ["", "**费用提示**"] + warn[:8]
-
-    lines += ["", "完整 HTML 报告在 VPS：reports/%s.html" % date_str]
-    return "\n".join(lines)
+    # 企业微信/钉钉单条正文有长度上限 → 超了就从尾部收掉（com 在最前，优先级最高）
+    out = "\n".join(lines).rstrip()
+    if len(out.encode("utf-8")) > TEXT_BUDGET:
+        cut, used = [], 0
+        for ln in lines:
+            used += len(ln.encode("utf-8")) + 1
+            if used > TEXT_BUDGET:
+                break
+            cut.append(ln)
+        cut.append("…（已截断，完整清单见 reports/%s.md）" % date_str)
+        out = "\n".join(cut)
+    return out
 
 
 def build_title(date_str, failure=False):
@@ -376,14 +376,14 @@ def main():
     date_str = args.date or dt.date.today().isoformat()
 
     if args.test:
-        demo = {"date": date_str, "top10": [
-            {"domain": "demo.com", "cls_label": "可发音英文", "score": 88,
-             "regdate": 2010, "reasons": ["可发音英文", "域龄 16 年"]},
-            {"domain": "demo.cn", "cls_label": "英文单词", "score": 100,
-             "regdate": 2005, "premium": True, "premiumprice": 588,
-             "reasons": ["英文单词"]}],
-            "by_class": {"en_pron": 1, "en_word": 1}, "watch": [], "all_items": []}
-        text = "这是一条**测试推送**，说明渠道配好了。\n\n" + build_text(demo, date_str)
+        demo_items = [
+            {"domain": "demo.com", "cls_label": "可发音英文", "score": 88, "regdate": 2010},
+            {"domain": "demo2.com", "cls_label": "英文单词", "score": 80, "regdate": 2005},
+            {"domain": "demo.cn", "cls_label": "可发音英文", "score": 76, "regdate": 2011},
+            {"domain": "demo.top", "cls_label": "英文单词", "score": 70, "regdate": 2020}]
+        demo = {"date": date_str, "all_items": demo_items, "top10": demo_items[:2],
+                "by_class": {"en_pron": 2, "en_word": 2}}
+        text = "这是一条测试推送，说明渠道配好了。\n\n" + build_text(demo, date_str)
         sys.exit(0 if notify(cfg, "[测试] " + build_title(date_str), text, demo) else 1)
 
     if args.failure:
@@ -400,8 +400,8 @@ def main():
         print("找不到 %s" % jpath, file=sys.stderr)
         sys.exit(2)
     result = json.load(open(jpath, encoding="utf-8"))
-    attach = [os.path.join(REPORTS, "%s.html" % date_str),
-              os.path.join(REPORTS, "%s.md" % date_str)]
+    # 只附 Markdown（2026-09-26 起不再生成 HTML 报告）
+    attach = [os.path.join(REPORTS, "%s.md" % date_str)]
     sys.exit(0 if notify(cfg, build_title(date_str), build_text(result, date_str),
                          result, attach) else 1)
 

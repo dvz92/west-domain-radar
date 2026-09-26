@@ -862,11 +862,12 @@ def main():
         "requests": _stats["requests"], "busy": _stats["busy"],
         "generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
-    md, html = build_report(result, today), build_html(result, today)
+    # 2026-09-26 用户要求："也不需要生成 html 报告" → 只出 Markdown + JSON
+    # （build_html() 还留在文件里，是给旧的 HTML 报告复现用的，主流程不再调用）
+    md = build_report(result, today)
     stamp = today.isoformat()
-    for name, content in (("%s.md" % stamp, md), ("%s.html" % stamp, html)):
-        with open(os.path.join(args.outdir, name), "w", encoding="utf-8") as f:
-            f.write(content)
+    with open(os.path.join(args.outdir, "%s.md" % stamp), "w", encoding="utf-8") as f:
+        f.write(md)
     with open(os.path.join(args.outdir, "%s.json" % stamp), "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     if args.json_only:

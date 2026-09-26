@@ -266,7 +266,7 @@ def cron_resume():
 def latest_report():
     if not os.path.isdir(REPORTS):
         return None
-    files = [f for f in os.listdir(REPORTS) if f.endswith(".html")]
+    files = [f for f in os.listdir(REPORTS) if f.endswith(".md")]
     files.sort()
     return os.path.join(REPORTS, files[-1]) if files else None
 
@@ -325,20 +325,21 @@ def act_show_report():
         warn("还没有报告，先跑一次（菜单 d）")
         pause()
         return
-    print("  HTML : %s" % rp)
-    md = rp[:-5] + ".md"
-    if os.path.exists(md):
-        print("  MD   : %s" % md)
+    print("  报告 : %s" % rp)
+    js = rp[:-3] + ".json"
+    if os.path.exists(js):
+        print("  JSON : %s" % js)
     print("  大小 : %.1f KB" % (os.path.getsize(rp) / 1024))
     print("  时间 : %s" % dt.datetime.fromtimestamp(os.path.getmtime(rp))
           .strftime("%Y-%m-%d %H:%M:%S"))
     print()
     print("  在你自己电脑上看，可以：")
     print(c("      scp %s@主机:%s ." % (os.environ.get("USER", "user"), rp), "cy"))
+    md = rp
     if os.path.exists(md):
         print()
         hr()
-        print(c("  报告摘要（前 40 行）", "dim"))
+        print(c("  报告内容（前 40 行）", "dim"))
         hr()
         for l in open(md, encoding="utf-8", errors="ignore").read().split("\n")[:40]:
             print("  " + l)

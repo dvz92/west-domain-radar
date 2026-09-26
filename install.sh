@@ -262,8 +262,8 @@ else
   say "现在就试跑一次（1~3 分钟；同时验证 west.cn 是否放行本机 IP）"
   if bash "$INSTALL_DIR/run.sh"; then
     D="$(TZ=Asia/Shanghai date +%F)"
-    if [ -f "$INSTALL_DIR/reports/$D.html" ]; then
-      say "成功！报告：$INSTALL_DIR/reports/$D.html"
+    if [ -f "$INSTALL_DIR/reports/$D.md" ]; then
+      say "成功！报告：$INSTALL_DIR/reports/$D.md"
     else
       warn "跑完了但没生成今天的报告，看日志：$INSTALL_DIR/logs/$D.log"
     fi
