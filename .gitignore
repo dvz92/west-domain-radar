@@ -19,3 +19,6 @@ assets/cn_pinyin_words.txt
 assets/abbr4.txt
 assets/en_trigram.json
 assets/en_clusters.json
+
+# 本地保留的完整文档（不随仓库分发）
+README.local.md
