@@ -364,8 +364,13 @@ def fetch_small_pools(dates, items, log=lambda s: None):
 
 
 def fetch_watch(domains, log=lambda s: None):
-    """定向核查：把用户关心的域名拿去问接口（`deldate=wei` = 所有待删除可预订）。
-    每次请求最多 20 个关键词（站点的硬限制）。"""
+    """定向核查：把指定域名拿去问接口（`deldate=wei` = 所有待删除可预订）。
+    每次请求最多 20 个关键词（站点的硬限制）。
+
+    ⚠️ 2026-09-26：用户明确说"不需要定向核查"，所以**主流程已不再调用这个函数**，
+    报告里也不再有第五节。保留它只因为备用的 22.cn 源（source22.py）还在用。
+    顺带一个已验证的事实：`domkey` 是**精确匹配**，查不存在的域名会返回 total=0。
+    """
     out = {}
     if not domains:
         return out
@@ -585,48 +590,29 @@ def build_report(result, today):
                 extra = "　（%s）" % it["detail"]["word"]
             A("%d. **%s** — %d 分，原注册 %s%s" % (
                 i, it["domain"], it["score"], it["regdate"] or "—", extra))
-    A("")
-    warn = [x for x in result["all_items"] if x["hot"] or x["premium"]]
-    A("## 四、费用提示（会进竞拍 / 需额外付费）")
-    A("")
-    if warn:
-        for it in warn[:12]:
-            tags = []
-            if it["hot"]:
-                tags.append("已有人预订→竞拍")
-            if it["premium"]:
-                tags.append("溢价域名（%s 元）" % (it["premiumprice"] or "?"))
-            A("- **%s** — %s" % (it["domain"], "、".join(tags)))
-    else:
-        A("*本轮取样里没有被预订或溢价的域名。*")
-    A("")
-    watch = result.get("watch") or []
-    if watch:
-        A("## 五、定向核查（你点名的域名是否还在）")
+    d4 = result.get("abbr4_diag")
+    if d4:
         A("")
-        A("| 域名 | 长度 | 删除日期 | 原注册 | 状态 |")
-        A("| --- | --- | --- | --- | --- |")
-        _rank = {x["domain"]: (i, x["score"]) for i, x in enumerate(result["all_items"], 1)}
-        for w in watch:
-            if w.get("included") is False:
-                A("| **%s** | %d | — | — | ⚠️ 不在本轮采集的分类池中（未验证） |"
-                  % (w["domain"], w["len"]))
-                continue
-            st = []
-            st.append("⚠️ 已被预订" if w["isyuding"] else "✅ 仍在待删除池中")
-            if w.get("out_of_batch"):
-                st.append("📌 不属于本轮批次（%s 到期的记录，本轮该后缀查的是别的日期）"
-                          % (w["deldate"] or "?"))
-            elif w["domain"] in _rank:
-                st.append("🏅 本轮第 %d 名（%d 分）" % _rank[w["domain"]])
-            if w["premium"]:
-                st.append("溢价 %s 元" % (w["premiumprice"] or "?"))
-            A("| **%s** | %d | %s | %s | %s |" % (
-                w["domain"], w["len"], w["deldate"] or "—", w["regdate"] or "—", "、".join(st)))
-        missing = [d for d in (result.get("watch_missing") or [])]
-        if missing:
-            A("")
-            A("未在待删除池中查到：%s" % "、".join(missing))
+        A("> **四声母诊断**：本批次 4 位域名 **%d** 个（`.com` 从 5 位起，所以四声母只可能来自 "
+          "`.cn/.top` 的 ≤4 位池），其中命中好词表的 **%d** 个（好词表共 %d 个四字词首字母组合）。"
+          "%s"
+          % (d4["four_total"], d4["four_whitelisted"], d4["whitelist"],
+             ("　命中：" + "、".join(d4["hits"])) if d4["hits"] else
+             "　→ 这批里确实没有你认可的好词，不是没查"))
+    A("")
+    # 溢价域名已在候选阶段整段排除（用户明确不考虑注册），这里只提示"已有人预订"的竞争风险
+    hot = [x for x in result["all_items"] if x["hot"]]
+    A("## 四、竞争提示（已有人预订 → 会进竞拍）")
+    A("")
+    if hot:
+        for it in hot[:12]:
+            A("- **%s** — 已有人预订，预订后可能进入竞拍" % it["domain"])
+    else:
+        A("*本轮取样里没有已被人预订的域名。*")
+    A("")
+    if result.get("excluded_premium"):
+        A("> 另有 **%d** 个溢价域名已从结果中剔除（溢价米不考虑注册）。"
+          % result["excluded_premium"])
         A("")
     A("---")
     A("")
@@ -686,41 +672,21 @@ def build_html(result, today):
         cats.append("<div class='cat'><h3><span class='tag %s'>%s</span> <em>%d 个</em></h3><ul>%s</ul></div>"
                     % (CLASS_CSS[ck], esc(lang.CLASS_LABEL[ck]), len(pool),
                        "".join(items_html) or "<li class='empty'>本轮没有取到</li>"))
+    d4 = result.get("abbr4_diag")
+    if d4:
+        cats.append("<div class='note'>四声母诊断：本批次 4 位域名 <b>%d</b> 个"
+                    "（.com 从 5 位起，四声母只可能来自 .cn/.top 的 ≤4 位池），"
+                    "命中好词表 <b>%d</b> 个（好词表共 %d 个组合）。%s</div>"
+                    % (d4["four_total"], d4["four_whitelisted"], d4["whitelist"],
+                       esc(("命中：" + "、".join(d4["hits"])) if d4["hits"]
+                           else "→ 这批里确实没有你认可的好词，不是没查")))
 
-    warn = [x for x in result["all_items"] if x["hot"] or x["premium"]]
-    warn_html = "".join("<li><b>%s</b><span>%s</span></li>" % (
-        esc(it["domain"]),
-        esc("、".join((["已有人预订→竞拍"] if it["hot"] else []) +
-                      (["溢价域名（%s 元）" % (it["premiumprice"] or "?")] if it["premium"] else []))))
-        for it in warn[:12]) or "<li class='empty'>本轮取样里没有被预订或溢价的域名</li>"
-
-    watch = result.get("watch") or []
-    watch_html = ""
-    if watch:
-        wr = []
-        _rank = {x["domain"]: (i, x["score"]) for i, x in enumerate(result["all_items"], 1)}
-        for w in watch:
-            if w.get("included") is False:
-                wr.append("<tr><td class='dm'>%s</td><td>%d</td><td>—</td><td>—</td>"
-                          "<td>⚠️ 不在本轮采集的分类池中（未验证）</td></tr>" % (esc(w["domain"]), w["len"]))
-                continue
-            st = ["⚠️ 已被预订" if w["isyuding"] else "✅ 仍在待删除池中"]
-            if w.get("out_of_batch"):
-                st.append("📌 不属于本轮批次（%s 到期，本轮该后缀查的是别的日期）" % (w["deldate"] or "?"))
-            elif w["domain"] in _rank:
-                st.append("🏅 本轮第 %d 名（%d 分）" % _rank[w["domain"]])
-            if w["premium"]:
-                st.append("溢价 %s 元" % (w["premiumprice"] or "?"))
-            wr.append("<tr><td class='dm'>%s</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td></tr>"
-                      % (esc(w["domain"]), w["len"], w["deldate"] or "—",
-                         w["regdate"] or "—", esc("、".join(st))))
-        watch_html = ("<h2>五、定向核查（点名的域名是否还在）</h2>"
-                      "<table><tr><th>域名</th><th>长度</th><th>删除日期</th>"
-                      "<th>原注册</th><th>状态</th></tr>%s</table>%s" % (
-                          "".join(wr),
-                          ("<p style='color:var(--mut);font-size:13px'>未在待删除池中查到：%s</p>"
-                           % esc("、".join(result.get("watch_missing") or [])))
-                          if result.get("watch_missing") else ""))
+    hot = [x for x in result["all_items"] if x["hot"]]
+    warn_html = "".join("<li><b>%s</b><span>已有人预订，预订后可能进入竞拍</span></li>" % esc(it["domain"])
+                       for it in hot[:12]) or "<li class='empty'>本轮取样里没有已被人预订的域名</li>"
+    if result.get("excluded_premium"):
+        warn_html += ("<li class='empty'>另有 %d 个溢价域名已从结果中剔除（溢价米不考虑注册）</li>"
+                      % result["excluded_premium"])
 
     return """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -760,9 +726,8 @@ tr:last-child td{border-bottom:none}
 <h2>二、最值得关注的 TOP 10</h2>
 <table><tr><th>#</th><th>域名</th><th>类别</th><th>评分</th><th>原注册</th><th>关注理由</th></tr>%s</table>
 <h2>三、按类别看</h2>%s
-<h2>四、费用提示（会进竞拍 / 需额外付费）</h2>
+<h2>四、竞争提示（已有人预订 → 会进竞拍）</h2>
 <div class="cat"><ul>%s</ul></div>
-%s
 <div class="note">%s<br>本次共请求接口 %s 次（限流重试 %s 次）。生成时间 %s。</div>
 </body></html>""" % (today.isoformat(), today.isoformat(),
                      esc(result.get("data_source") or
@@ -781,7 +746,7 @@ tr:last-child td{border-bottom:none}
                           % result["dropped_offbatch"])
                       if result.get("dropped_offbatch") else ""),
                      "".join(rows), "".join(cats),
-                     warn_html, watch_html, esc(result.get("sample_note") or ""),
+                     warn_html, esc(result.get("sample_note") or ""),
                      result["requests"], result["busy"], result["generated_at"])
 
 
@@ -801,8 +766,6 @@ def main():
     ap.add_argument("--dates", default="")
     ap.add_argument("--today", default="")
     ap.add_argument("--outdir", default=REPORTS)
-    ap.add_argument("--watch", default="", help="定向核查的域名清单文件（每行一个）；"
-                                                "默认自动读 assets/watchlist.txt")
     args = ap.parse_args()
 
     today = dt.date.fromisoformat(args.today) if args.today else dt.date.today()
@@ -819,19 +782,13 @@ def main():
         sys.exit(3)
     log("删除日期：" + "、".join("%s=%s" % (k, v[0]) for k, v in dates.items()))
 
-    pool, watched, domains_requested = {}, {}, []
+    pool = {}
     try:
         # ⚠️ 顺序有意义：**先枚举 ≤4 位的小池子**，再花剩余预算去采样大池子。
         # 反过来的话，大池子采样会把请求预算吃光，把 top ≤4 位（今天只有 81 条、
         # 却是最值钱的一档）整段跳掉 —— 2026-09-26 就这么把 loho.top 挤掉了。
         pool_totals = fetch_small_pools(dates, pool, log)
         pool_totals.update(fetch_scoped(dates, pool, log))
-        wf = args.watch or os.path.join(ASSETS, "watchlist.txt")
-        if os.path.exists(wf):
-            doms = [l.strip().lower() for l in open(wf, encoding="utf-8", errors="ignore")
-                    if l.strip() and not l.startswith("#")]
-            domains_requested = doms
-            watched = fetch_watch(doms, log)
     except BusyError as e:
         print("ERROR: %s（已中断，避免加重封禁）" % e, file=sys.stderr)
         sys.exit(3)
@@ -853,16 +810,15 @@ def main():
             % (len(dropped), "、".join("%s[%s≠%s]" % t for t in dropped[:3])))
     pool = keep
 
-    # 定向核查命中的域名，**只有确实属于本批次时**才并入候选池参与排序；
-    # 不属于的只出现在第五节"定向核查"里（如实标注它的真实删除日期）。
-    # 2026-09-26 修：atiron.com 的真实删除日期是 09-29，而当天 com 的批次是 09-30，
-    # 无条件合并会让榜单里凭空多出一个"最近清单里都没有"的域名。
-    for d, it in list(watched.items()):          # 遍历时可能改写同一字典 → 用快照
-        ext = (it.get("domext") or d.rsplit(".", 1)[-1] or "").lower()
-        if (it.get("deldate") or "")[:10] == dates.get(ext, (None,))[0]:
-            pool.setdefault(d, it)
-        else:
-            it["out_of_batch"] = True
+    # ── 溢价域名整段排除 ──
+    # 用户 2026-09-26 明确说："结果里也不需要溢价域名"（溢价米预订要额外付费，他不会考虑注册）。
+    # 所以不是"排在后面"，是**直接不出现**。排除数量仍然写进报告，避免看起来像漏查。
+    excluded_premium = [d for d, it in pool.items() if it.get("ispremium")]
+    for d in excluded_premium:
+        pool.pop(d, None)
+    if excluded_premium:
+        log("  💸 排除 %d 个溢价域名（不考虑注册）：%s"
+            % (len(excluded_premium), "、".join(sorted(excluded_premium)[:6])))
 
     items = list(pool.values())
     scored = []
@@ -879,18 +835,19 @@ def main():
               file=sys.stderr)
         sys.exit(3)
 
-    watch_rows = []
-    for d, it in sorted(watched.items()):
-        watch_rows.append({
-            "domain": d, "deldate": it.get("deldate"), "regdate": it.get("regdate"),
-            "len": len(d.split(".")[0]),
-            "isyuding": _int(it.get("isyd")) == 1 or _int(it.get("isyuding")) == 1,
-            "premium": bool(it.get("ispremium")), "premiumprice": _int(it.get("premiumprice")),
-            "out_of_batch": bool(it.get("out_of_batch")),
-        })
-    # 点名的域名若接口没返回，说明已不在待删除池（被抢注/已释放），必须在报告里如实列出，
-    # 否则会被静默丢弃、用户以为"没核查"（2026-09-26 修：sery.cn / glax.cn 曾这样消失）。
-    watch_missing = [d for d in domains_requested if d not in watched]
+    # ── 四声母（拼音首字母）诊断 ──
+    # 用户 2026-09-26 问："拼音首字母（4声母）这几天都没有取到，是没有好的值得推荐，还是查询有问题？"
+    # 实测答案：机制没问题，是白名单太窄 —— 今天抽样的 100 个 4 位 .cn 里 79 个都是
+    # "读不出来的串"（正是四声母的形态），但一条都没落在 210 个好词组合里。
+    # 所以把这个数字**每天写进报告**：以后一眼就能看出是"真没有"还是"没查到"。
+    def _lbl(dom):
+        return dom.split(".")[0]
+    four = [d for d in pool if re.fullmatch(r"[a-z]{4}", _lbl(d))]
+    hits = sorted(d for d in four if lang.abbr4_match(_lbl(d)))
+    abbr_diag = {"four_total": len(four), "four_whitelisted": len(hits),
+                 "whitelist": lang.abbr4_size(), "hits": hits[:10]}
+    log("  🔤 四声母诊断：本批次 4 位域名 %d 个，命中好词表 %d 个（好词表 %d 个组合）"
+        % (len(four), len(hits), abbr_diag["whitelist"]))
 
     by_cls = {k: [x for x in scored if x["cls"] == k] for k in lang.CLASS_ORDER}
     result = {
@@ -898,8 +855,9 @@ def main():
         "pool_totals": pool_totals,
         "pool_total": sum(scope_of(v)[0] for v in pool_totals.values()),
         "dropped_offbatch": len(dropped),
+        "excluded_premium": len(excluded_premium),
+        "abbr4_diag": abbr_diag,
         "sampled": len(items), "all_items": scored, "top10": scored[:10],
-        "watch": watch_rows, "watch_missing": watch_missing,
         "by_class": {k: len(v) for k, v in by_cls.items()},
         "requests": _stats["requests"], "busy": _stats["busy"],
         "generated_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

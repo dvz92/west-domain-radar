@@ -295,6 +295,12 @@ def abbr4_match(label):
     return _abbr4.get(label)
 
 
+def abbr4_size():
+    """白名单里有多少个四字词首字母组合（报告里用来说明命中率）"""
+    load()
+    return len(_abbr4)
+
+
 # ------------------------------------------------------------ 主分类
 def classify(label):
     """返回 dict(cls, score_hint, detail, reason)，或 None 表示不值得关注"""
